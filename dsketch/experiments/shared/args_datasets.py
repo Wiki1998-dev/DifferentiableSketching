@@ -325,6 +325,141 @@ class KMNISTDataset(_Dataset):
 
         return train, valid, testset
 
+
+class SK506Dataset(_Dataset):
+    """SK506 Dataset for skeleton detection following framework pattern."""
+
+    @staticmethod
+    def _add_args(p):
+        p.add_argument("--dataset-root", help="location of the SK506 dataset", type=pathlib.Path,
+                       default=pathlib.Path("./data/sk506/"), required=False)
+        p.add_argument("--valset-size-per-class", help="number of examples to use in validation set per class",
+                       type=int, default=1, required=False)
+        p.add_argument("--dataset-seed", help="random seed for the train/validation split", type=int,
+                       default=1234, required=False)
+        p.add_argument("--image-size", help="target image size", type=int, default=128, required=False)
+        p.add_argument("--augment", help="add data augmentation", default=False, required=False, action='store_true')
+        p.add_argument("--skeleton", help="Convert the INPUT to a morphological skeleton", default=False,
+                       required=False, action='store_true')
+
+    @classmethod
+    def get_size(cls, args):
+        return args.image_size
+
+    @classmethod
+    def get_channels(cls, args):
+        return 1
+
+    @classmethod
+    def inv_transform(cls, x):
+        return x
+
+    @classmethod
+    def get_transforms(cls, args, train=False):
+        """Get image transforms for the INPUT image."""
+        tf = []
+        if train and args.augment:
+            tf.append(transforms.RandomHorizontalFlip(0.5))
+            tf.append(transforms.RandomRotation(10))
+        tf.append(transforms.Resize((args.image_size, args.image_size)))
+        if args.skeleton:
+            tf.append(skeleton)  # This skeletonizes the input, not the target
+        tf.append(transforms.ToTensor())
+        return compose(transforms.Compose(tf), args)
+
+    @classmethod
+    def create(cls, args):
+        from torch.utils.data import Dataset
+
+        class _SK506Impl(Dataset):
+            def __init__(self, root_dir, split='train', transform=None, size=256, dataset_seed=1234):
+                self.root_dir = str(root_dir)
+                self.split = split
+                self.transform = transform
+                self.size = size
+                self.dataset_seed = dataset_seed
+
+                split_file = os.path.join(self.root_dir, f'{split}.txt')
+                if not os.path.exists(split_file):
+                    self._create_split_files()
+                with open(split_file, 'r') as f:
+                    self.image_names = [line.strip() for line in f.readlines()]
+
+                self.target_transform = transforms.Compose([
+                    transforms.Resize((self.size, self.size)),
+                    transforms.ToTensor()
+                ])
+
+            def _create_split_files(self):
+                images_dir = os.path.join(self.root_dir, 'images')
+                gt_dir = os.path.join(self.root_dir, 'groundtruth')
+                all_images = sorted(
+                    f for f in os.listdir(images_dir)
+                    if f.endswith('.jpg') and os.path.exists(os.path.join(gt_dir, f.replace('.jpg', '.png')))
+                )
+
+                if len(all_images) < 2:
+                    train_images = all_images.copy()
+                    test_images = all_images.copy()
+                else:
+                    n = len(all_images)
+                    test_count = min(max(1, int(round(0.2 * n))), n - 1)
+                    train_images, test_images = train_test_split(
+                        all_images,
+                        test_size=test_count,
+                        random_state=self.dataset_seed,
+                        shuffle=True
+                    )
+
+                with open(os.path.join(self.root_dir, 'train.txt'), 'w') as f:
+                    f.writelines(f"{img}\n" for img in train_images)
+                with open(os.path.join(self.root_dir, 'test.txt'), 'w') as f:
+                    f.writelines(f"{img}\n" for img in test_images)
+
+            def __len__(self):
+                return len(self.image_names)
+
+            def __getitem__(self, idx):
+                img_name = self.image_names[idx]
+                img_path = os.path.join(self.root_dir, 'images', img_name)
+                input_image = Image.open(img_path).convert('L')
+
+                gt_name = img_name.replace('.jpg', '.png')
+                gt_path = os.path.join(self.root_dir, 'groundtruth', gt_name)
+                skeleton_image = Image.open(gt_path).convert('L')
+
+                input_tensor = self.transform(input_image)
+                target_tensor = self.target_transform(skeleton_image)
+                target_tensor = (target_tensor > 0.5).float()
+
+                return input_tensor, target_tensor
+
+        full_trainset = _SK506Impl(
+            root_dir=args.dataset_root, split='train',
+            transform=cls.get_transforms(args, True), size=args.image_size,
+            dataset_seed=args.dataset_seed)
+        testset = _SK506Impl(
+            root_dir=args.dataset_root, split='test',
+            transform=cls.get_transforms(args, False), size=args.image_size,
+            dataset_seed=args.dataset_seed)
+
+        train_size = len(full_trainset)
+        if train_size < 2:
+            trainset = full_trainset
+            validset = full_trainset
+        else:
+            val_size = max(1, train_size // 5)
+            train_indices, valid_idx = train_test_split(
+                list(range(train_size)),
+                test_size=val_size,
+                random_state=args.dataset_seed,
+                shuffle=True
+            )
+            trainset = torch.utils.data.Subset(full_trainset, train_indices)
+            validset = torch.utils.data.Subset(full_trainset, valid_idx)
+
+        return trainset, validset, testset
+
      
 from PIL import Image
 
